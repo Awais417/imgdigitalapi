@@ -1,0 +1,55 @@
+.see-more-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 24px;
+    transition: all 0.3s ease;
+    padding: 20px 81px;
+    gap: 10px;
+    background: rgba(0, 174, 107, 0.2);
+    border: 1px solid #03FF9E;
+    border-radius: 999px;
+    font-family: 'Effra Trial';
+    font-style: normal;
+    font-weight: 400;
+    font-size: 20px;
+    text-transform: capitalize;
+    color: #FFFFFF;
+}
+
+/* 🌿 Green Theme */
+.see-more-btn.green {
+  border-color: #00ff99;
+}
+.see-more-btn.green:hover {
+  background: rgba(0, 255, 153, 0.1);
+  box-shadow: 0 0 12px rgba(0, 255, 153, 0.4);
+}
+
+/* 💙 Blue Theme */
+.see-more-btn.blue {
+  border-color: #00bfff;
+}
+.see-more-btn.blue:hover {
+  background: rgba(0, 191, 255, 0.1);
+  box-shadow: 0 0 12px rgba(0, 191, 255, 0.4);
+}
+
+/* 💖 Pink Theme */
+.see-more-btn.pink {
+  border-color: #ff66cc;
+}
+.see-more-btn.pink:hover {
+  background: rgba(255, 102, 204, 0.1);
+  box-shadow: 0 0 12px rgba(255, 102, 204, 0.4);
+}
+
+/* Arrow hover animation */
+.arrow-icon {
+  transition: transform 0.3s ease;
+}
+
+.see-more-btn:hover .arrow-icon {
+  transform: translateX(4px);
+}

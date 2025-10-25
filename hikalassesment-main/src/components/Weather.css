@@ -1,0 +1,443 @@
+.weather {
+	padding: 100px 0;
+	background-image: url(/public/images/video.png);
+	background-position: center;
+	background-repeat: no-repeat;
+	background-size: cover;
+}
+
+.weather-header {
+	text-align: center;
+	margin-bottom: 60px;
+}
+
+.section-tag {
+	display: flex;
+	flex-direction: row;
+	justify-content: center;
+	align-items: center;
+	padding: 17px 21px;
+	gap: 10px;
+	width: fit-content;
+	background: linear-gradient(
+		180deg,
+		rgba(0, 174, 107, 0.01) 14.89%,
+		rgba(0, 72, 44, 0.1) 146.81%
+	);
+	border: 0.5px solid rgba(0, 174, 107, 0.5);
+	border-radius: 28px;
+	margin: 0 auto;
+	margin-bottom: 31px;
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 400;
+	font-size: 16px;
+	text-align: center;
+	text-transform: capitalize;
+	color: #ffffff;
+}
+
+.section-title {
+	font-style: normal;
+	font-weight: 700;
+	font-size: 50px;
+	line-height: 109%;
+	text-align: center;
+	letter-spacing: -0.011em;
+	text-transform: uppercase;
+	color: #ffffff;
+}
+
+.section-title .highlight {
+	color: #00ae6b;
+}
+
+.section-description {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 400;
+	font-size: 20px;
+	line-height: 30px;
+	text-align: center;
+	text-transform: capitalize;
+	color: #d3d3d3;
+}
+
+.weather-search {
+	margin-bottom: 60px;
+	display: flex;
+}
+
+.search-form {
+	width: 100%;
+	max-width: 807px;
+}
+
+.search-icon {
+	position: absolute;
+	right: 15px;
+	color: #ffffff;
+	opacity: 0.7;
+	z-index: 2;
+	top: 50%;
+	transform: translateY(-50%);
+}
+.search-input {
+	position: relative;
+}
+.search-input input {
+	width: 100%;
+	padding: 15px 15px 15px 15px;
+	background: rgba(255, 255, 255, 0.1);
+	border: unset;
+	border-radius: 8px;
+	color: #ffffff;
+	font-size: 16px;
+	backdrop-filter: blur(10px);
+}
+
+.search-input input::placeholder {
+	color: rgba(255, 255, 255, 0.7);
+}
+
+.search-input input:focus {
+	outline: none;
+	border-color: #00ff7f;
+	box-shadow: 0 0 0 2px rgba(0, 255, 127, 0.2);
+}
+
+.weather-content {
+	display: grid;
+	grid-template-columns: 2fr 1fr;
+	gap: 28px;
+}
+
+.weather-location h3 {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 700;
+	font-size: 40px;
+	line-height: 64px;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #ffffff;
+}
+
+.weather-location p {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 400;
+	font-size: 24px;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #bbbbbb;
+}
+
+.current-temp {
+	margin-bottom: 40px;
+}
+
+.temp-value {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 700;
+	font-size: 64px;
+	line-height: 64px;
+	text-align: center;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #ffffff;
+	margin-top: 87px;
+	display: inline-block;
+}
+.weather_top_main {
+	display: flex;
+	justify-content: space-between;
+}
+.today-forecast {
+	margin-bottom: 40px;
+	padding: 31px 16px;
+	gap: 24px;
+	background: linear-gradient(
+		180deg,
+		rgba(217, 217, 217, 0.1) 0%,
+		rgba(115, 115, 115, 0.1) 100%
+	);
+	border-radius: 12px;
+}
+.today_head h6 {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 700;
+	font-size: 24px;
+	line-height: 64px;
+	letter-spacing: -0.25px;
+	text-transform: uppercase;
+	color: #cbbebb;
+}
+.forecast-scroll {
+	display: flex;
+	gap: 20px;
+	overflow-x: auto;
+	padding: 10px 0;
+	scrollbar-width: none;
+	-ms-overflow-style: none;
+	justify-content: space-between;
+}
+
+.forecast-scroll::-webkit-scrollbar {
+	display: none;
+}
+
+.forecast-item {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 54px;
+	width: fit-content;
+	color: #ffffff;
+	position: relative;
+}
+.forecast-item::after {
+	content: "";
+	position: absolute;
+	border: 1px solid rgba(0, 174, 107, 0.2);
+	height: 80%;
+	right: -30px;
+	top: 50%;
+	transform: translateY(-50%);
+}
+
+.forecast-time {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 500;
+	font-size: 20px;
+	text-align: center;
+	letter-spacing: -0.25px;
+	text-transform: uppercase;
+	color: #bbbbbb;
+}
+
+.forecast-icon img {
+	width: 74px;
+	height: 39px;
+	object-fit: contain;
+}
+
+.forecast-temp {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 700;
+	font-size: 24px;
+	text-align: center;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #ffffff;
+}
+
+.air-conditions {
+	padding: 31px 16px;
+	background: linear-gradient(
+		180deg,
+		rgba(217, 217, 217, 0.1) 0%,
+		rgba(115, 115, 115, 0.1) 100%
+	);
+	border-radius: 12px;
+}
+
+.conditions-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 20px;
+}
+
+.conditions-header h4 {
+	color: #ffffff;
+	font-size: 1rem;
+	font-weight: 600;
+}
+
+.conditions-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	column-gap: 380px;
+	row-gap: 37px;
+}
+
+.condition-item {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+}
+.condition-item:nth-child(even) {
+}
+
+.condition-icon {
+	width: 30px;
+	height: 30px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: #00ff7f;
+}
+
+.condition-info {
+	display: flex;
+	flex-direction: column;
+	gap: 25px;
+}
+
+.condition-label {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 500;
+	font-size: 20px;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #bbbbbb;
+}
+
+.condition-value {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 700;
+	font-size: 24px;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #ffffff;
+}
+
+.weekly-forecast {
+	background: linear-gradient(
+		180deg,
+		rgba(217, 217, 217, 0.1) 0%,
+		rgba(115, 115, 115, 0.1) 100%
+	);
+	border-radius: 12px;
+	padding: 31px 12px;
+}
+
+.forecast-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 20px;
+}
+
+.forecast-header h4 {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 700;
+	font-size: 24px;
+	letter-spacing: -0.25px;
+	text-transform: uppercase;
+	color: #cbbebb;
+}
+
+.large-sun-icon {
+	color: #ffd700;
+}
+
+.forecast-list {
+	display: flex;
+	flex-direction: column;
+}
+
+.forecast-day {
+	display: grid;
+	grid-template-columns: 1fr auto 1fr auto;
+	align-items: center;
+	gap: 15px;
+	padding: 41px 0;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.forecast-day:first-child {
+	padding-top: 0;
+}
+.forecast-day:last-child {
+	border-bottom: none;
+	padding-bottom: 0;
+}
+
+.day-name {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 500;
+	font-size: 20px;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #bbbbbb;
+}
+.day-icon img {
+	width: 41px;
+	height: 41px;
+	object-fit: contain;
+}
+
+.day-condition {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 500;
+	font-size: 20px;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #ffffff;
+}
+
+.day-temp {
+	font-family: "Effra Trial";
+	font-style: normal;
+	font-weight: 700;
+	font-size: 20px;
+	text-align: center;
+	letter-spacing: -0.25px;
+	text-transform: capitalize;
+	color: #ffffff;
+}
+
+/* Tablet Styles */
+@media (max-width: 1280px) {
+	.conditions-grid {
+		display: grid;
+		column-gap: 240px;
+		row-gap: 20px;
+	}
+	.forecast-day {
+		gap: 5px;
+		padding: 25px 0;
+	}
+}
+@media screen and (max-width: 1000px) {
+	.weather-content {
+		grid-template-columns: repeat(1, 1fr);
+	}
+}
+@media screen and (max-width: 640px) {
+	.section-title {
+		font-size: 30px;
+	}
+	.weather-location h3 {
+		font-size: 20px;
+		line-height: 34px;
+	}
+	.weather-location p {
+		font-size: 14px;
+	}
+.temp-value {
+    font-size: 34px;
+    line-height: 45px;
+    margin-top: 17px;
+}
+.forecast-item {
+    gap: 14px;
+    width: 47%;
+}
+.forecast-scroll {
+    flex-wrap: wrap;
+}
+    .conditions-grid {
+        column-gap: 0;
+    }
+}
