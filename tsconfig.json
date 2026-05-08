@@ -22,5 +22,5 @@
     "strictBindCallApply": false,
     "noFallthroughCasesInSwitch": false
   },
-  "exclude": ["node_modules", "dist", "netlify"]
+  "exclude": ["node_modules", "dist", "netlify", "**/*.spec.ts"]
 }
