@@ -4,6 +4,7 @@ import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { ImageModule } from './image/image.module';
 import { PdfModule } from './pdf/pdf.module';
+import { DestroyModule } from './destroy/destroy.module';
 
 @Module({
   imports: [
@@ -11,6 +12,7 @@ import { PdfModule } from './pdf/pdf.module';
     AuthModule,
     ImageModule,
     PdfModule,
+    DestroyModule,
   ],
   controllers: [AppController],
 })
