@@ -620,6 +620,33 @@ export class PdfController {
     }
   }
 
+  @Post('edit-text')
+  @UseInterceptors(FileInterceptor('file'))
+  async editText(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.editText(
+        file.buffer,
+        body.new_text ?? '',
+        parseInt(body.page ?? '1', 10),
+        parseFloat(body.x ?? '100'),
+        parseFloat(body.y ?? '100'),
+        parseFloat(body.cover_width ?? '200'),
+        parseFloat(body.cover_height ?? '20'),
+        parseFloat(body.font_size ?? '12'),
+        body.font_color ?? '#000000',
+        body.cover_color ?? '#ffffff',
+      );
+      this.reply(res, result, 'edited');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
   /* ═══════════════════════════════════════════════════════════════════════
      SECURITY
   ═══════════════════════════════════════════════════════════════════════ */
@@ -648,6 +675,86 @@ export class PdfController {
     } catch (e) {
       this.err(res, 500, (e as Error).message);
     }
+  }
+
+  @Post('set-permissions')
+  @UseInterceptors(FileInterceptor('file'))
+  async setPermissions(@UploadedFile() file: MFile, @Res() res: Response) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    this.notImplemented(
+      res,
+      'Permission-based encryption requires qpdf or a commercial PDF encryption library. ' +
+      'pdf-lib v1.x does not support AES encryption.',
+    );
+  }
+
+  @Post('redact')
+  @UseInterceptors(FileInterceptor('file'))
+  async redact(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.redact(
+        file.buffer,
+        parseInt(body.page ?? '1', 10),
+        parseFloat(body.x ?? '100'),
+        parseFloat(body.y ?? '100'),
+        parseFloat(body.width ?? '200'),
+        parseFloat(body.height ?? '20'),
+        body.color ?? '#000000',
+      );
+      this.reply(res, result, 'redacted');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('stamp')
+  @UseInterceptors(FileInterceptor('file'))
+  async addStamp(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.addStamp(
+        file.buffer,
+        body.text ?? 'APPROVED',
+        body.position ?? 'center',
+        body.pages ?? 'all',
+        parseFloat(body.font_size ?? '48'),
+        body.color ?? '#ff0000',
+        parseFloat(body.opacity ?? '40'),
+        parseFloat(body.rotation ?? '330'),
+      );
+      this.reply(res, result, 'stamped');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('digital-id')
+  @UseInterceptors(FileInterceptor('file'))
+  async digitalId(@UploadedFile() file: MFile, @Res() res: Response) {
+    this.notImplemented(
+      res,
+      'Digital ID creation requires a cryptographic signing library such as node-forge or a commercial PDF SDK.',
+    );
+  }
+
+  @Post('validate-signature')
+  @UseInterceptors(FileInterceptor('file'))
+  async validateSignature(@UploadedFile() file: MFile, @Res() res: Response) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    this.notImplemented(
+      res,
+      'Signature validation requires cryptographic verification libraries. ' +
+      'Consider integrating node-forge or a commercial PDF validation service.',
+    );
   }
 
   /* ═══════════════════════════════════════════════════════════════════════

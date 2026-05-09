@@ -635,6 +635,39 @@ export class PdfService {
     return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
   }
 
+  async editText(
+    buffer: Buffer,
+    newText: string,
+    page: number,
+    x: number,
+    y: number,
+    coverWidth: number,
+    coverHeight: number,
+    fontSize: number,
+    fontColor: string,
+    coverColor: string,
+  ): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const pageIdx = Math.max(1, Math.min(page, total)) - 1;
+    const pg = doc.getPage(pageIdx);
+    const { height } = pg.getSize();
+
+    // PDF y-axis is from bottom; convert from top-based input
+    const pdfY = height - y - coverHeight;
+
+    const coverRgb = this.hexToColor(coverColor);
+    pg.drawRectangle({ x, y: pdfY, width: coverWidth, height: coverHeight, color: coverRgb });
+
+    if (newText.trim()) {
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      const textColor = this.hexToColor(fontColor);
+      pg.drawText(newText, { x: x + 2, y: pdfY + 2, size: fontSize, font, color: textColor });
+    }
+
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
   /* ═══════════════════════════════════════════════════════════════════════
      SECURITY
   ═══════════════════════════════════════════════════════════════════════ */
@@ -643,6 +676,76 @@ export class PdfService {
     // pdf-lib does not support decrypting password-protected PDFs.
     // ignoreEncryption loads the structure but content remains encrypted.
     const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  async redact(
+    buffer: Buffer,
+    page: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    colorHex: string,
+  ): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const pageIdx = Math.max(1, Math.min(page, total)) - 1;
+    const pg = doc.getPage(pageIdx);
+    const { height: pageHeight } = pg.getSize();
+    const pdfY = pageHeight - y - height;
+    const color = this.hexToColor(colorHex);
+    pg.drawRectangle({ x, y: pdfY, width, height, color });
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  async addStamp(
+    buffer: Buffer,
+    text: string,
+    position: string,
+    pagesStr: string,
+    fontSize: number,
+    colorHex: string,
+    opacity: number,
+    rotation: number,
+  ): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const font = await doc.embedFont(StandardFonts.HelveticaBold);
+    const color = this.hexToColor(colorHex);
+    const op = Math.max(0, Math.min(100, opacity)) / 100;
+    const total = doc.getPageCount();
+
+    const indices = pagesStr.trim().toLowerCase() === 'all'
+      ? Array.from({ length: total }, (_, i) => i)
+      : this.parseRanges(pagesStr, total).flat();
+
+    for (const i of indices) {
+      if (i < 0 || i >= total) continue;
+      const pg = doc.getPage(i);
+      const { width, height } = pg.getSize();
+      const tw = font.widthOfTextAtSize(text, fontSize);
+      const th = fontSize;
+
+      const posMap: Record<string, [number, number]> = {
+        'center':       [(width - tw) / 2,  (height - th) / 2],
+        'top-left':     [40,                 height - th - 40],
+        'top-right':    [width - tw - 40,    height - th - 40],
+        'bottom-left':  [40,                 40],
+        'bottom-right': [width - tw - 40,    40],
+      };
+      const [px, py] = posMap[position] ?? posMap['center'];
+
+      pg.drawRectangle({
+        x: px - 8, y: py - 6,
+        width: tw + 16, height: th + 12,
+        borderColor: color, borderWidth: 3,
+        opacity: op,
+      });
+      pg.drawText(text, {
+        x: px, y: py, size: fontSize, font, color,
+        opacity: op, rotate: degrees(rotation),
+      });
+    }
     return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
   }
 
