@@ -5,6 +5,7 @@ import {
   degrees,
   StandardFonts,
   Color,
+  PDFName,
 } from 'pdf-lib';
 import JSZip from 'jszip';
 import sharp from 'sharp';
@@ -108,6 +109,201 @@ export class PdfService {
 
     const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
     return { buffer: zipBuf as Buffer, mime: 'application/zip', ext: 'zip' };
+  }
+
+  async selectiveMerge(buffers: Buffer[], pageRangesStr: string): Promise<PdfResult> {
+    const merged = await PDFDocument.create();
+    for (const buf of buffers) {
+      const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+      const total = doc.getPageCount();
+      const indices = !pageRangesStr?.trim()
+        ? Array.from({ length: total }, (_, i) => i)
+        : this.parseRanges(pageRangesStr, total).flat();
+      const pages = await merged.copyPages(doc, indices);
+      pages.forEach(p => merged.addPage(p));
+    }
+    return { buffer: this.toBuffer(await merged.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  async splitBySize(buffer: Buffer, maxSizeMb: number): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const maxBytes = Math.max(0.1, maxSizeMb) * 1024 * 1024;
+    const zip = new JSZip();
+    let group: number[] = [];
+    let groupSize = 0;
+    let part = 1;
+
+    for (let i = 0; i < total; i++) {
+      const pageDoc = await PDFDocument.create();
+      const [p] = await pageDoc.copyPages(doc, [i]);
+      pageDoc.addPage(p);
+      const pageBytes = (await pageDoc.save()).length;
+
+      if (group.length > 0 && groupSize + pageBytes > maxBytes) {
+        const batchDoc = await PDFDocument.create();
+        const batchPages = await batchDoc.copyPages(doc, group);
+        batchPages.forEach(pg => batchDoc.addPage(pg));
+        zip.file(`part_${String(part++).padStart(3, '0')}.pdf`, await batchDoc.save());
+        group = [];
+        groupSize = 0;
+      }
+      group.push(i);
+      groupSize += pageBytes;
+    }
+
+    if (group.length > 0) {
+      const batchDoc = await PDFDocument.create();
+      const batchPages = await batchDoc.copyPages(doc, group);
+      batchPages.forEach(pg => batchDoc.addPage(pg));
+      zip.file(`part_${String(part).padStart(3, '0')}.pdf`, await batchDoc.save());
+    }
+
+    const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    return { buffer: zipBuf as Buffer, mime: 'application/zip', ext: 'zip' };
+  }
+
+  async splitByBookmark(buffer: Buffer, bookmarkLevel: string): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+
+    const pageRefIndex = new Map<string, number>();
+    for (let i = 0; i < total; i++) {
+      pageRefIndex.set((doc.getPage(i) as any).ref.toString(), i);
+    }
+
+    const splitPoints = new Set<number>([0]);
+    const maxDepth = bookmarkLevel === 'all' ? 999 : parseInt(bookmarkLevel, 10);
+
+    try {
+      const ctx = (doc as any).context;
+      const catalog = (doc as any).catalog;
+      const outlinesRef = catalog.get(PDFName.of('Outlines'));
+      if (outlinesRef) {
+        const outlinesDict = ctx.lookup(outlinesRef);
+        const traverse = (dict: any, depth: number) => {
+          if (!dict || depth > maxDepth) return;
+          let cur = dict.get(PDFName.of('First'));
+          while (cur) {
+            const item = ctx.lookup(cur);
+            if (!item) break;
+            const dest = item.get(PDFName.of('Dest'));
+            if (dest) {
+              const arr = ctx.lookup(dest) ?? dest;
+              if (arr && typeof arr.get === 'function') {
+                const pageRef = arr.get(0);
+                if (pageRef) {
+                  const idx = pageRefIndex.get(pageRef.toString());
+                  if (idx !== undefined && idx > 0) splitPoints.add(idx);
+                }
+              }
+            }
+            const action = item.get(PDFName.of('A'));
+            if (action) {
+              const act = ctx.lookup(action);
+              if (act) {
+                const d = act.get(PDFName.of('D'));
+                if (d) {
+                  const arr = ctx.lookup(d) ?? d;
+                  if (arr && typeof arr.get === 'function') {
+                    const pageRef = arr.get(0);
+                    if (pageRef) {
+                      const idx = pageRefIndex.get(pageRef.toString());
+                      if (idx !== undefined && idx > 0) splitPoints.add(idx);
+                    }
+                  }
+                }
+              }
+            }
+            traverse(item, depth + 1);
+            cur = item.get(PDFName.of('Next'));
+          }
+        };
+        traverse(outlinesDict, 1);
+      }
+    } catch {
+      for (let i = 1; i < total; i++) splitPoints.add(i);
+    }
+
+    const points = Array.from(splitPoints).sort((a, b) => a - b);
+    const zip = new JSZip();
+    for (let i = 0; i < points.length; i++) {
+      const start = points[i];
+      const end = i + 1 < points.length ? points[i + 1] : total;
+      const pages = Array.from({ length: end - start }, (_, k) => start + k);
+      const newDoc = await PDFDocument.create();
+      const copied = await newDoc.copyPages(doc, pages);
+      copied.forEach(p => newDoc.addPage(p));
+      zip.file(`section_${String(i + 1).padStart(3, '0')}.pdf`, await newDoc.save());
+    }
+    const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    return { buffer: zipBuf as Buffer, mime: 'application/zip', ext: 'zip' };
+  }
+
+  async deletePages(buffer: Buffer, pagesStr: string): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const toDelete = new Set(this.parseRanges(pagesStr, total).flat());
+    const remaining = Array.from({ length: total }, (_, i) => i).filter(i => !toDelete.has(i));
+    const newDoc = await PDFDocument.create();
+    if (remaining.length > 0) {
+      const copied = await newDoc.copyPages(doc, remaining);
+      copied.forEach(p => newDoc.addPage(p));
+    }
+    return { buffer: this.toBuffer(await newDoc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  async rotatePages(buffer: Buffer, pagesStr: string, rotation: number): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const indices = pagesStr.trim().toLowerCase() === 'all'
+      ? Array.from({ length: total }, (_, i) => i)
+      : this.parseRanges(pagesStr, total).flat();
+    const pageSet = new Set(indices);
+    for (let i = 0; i < total; i++) {
+      if (pageSet.has(i)) {
+        const page = doc.getPage(i);
+        const current = page.getRotation().angle;
+        page.setRotation(degrees((current + rotation) % 360));
+      }
+    }
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  async reorderPages(buffer: Buffer, orderStr: string): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const order = (orderStr || '')
+      .split(',')
+      .map(s => parseInt(s.trim(), 10) - 1)
+      .filter(i => i >= 0 && i < total);
+    if (!order.length) {
+      return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+    }
+    const newDoc = await PDFDocument.create();
+    const copied = await newDoc.copyPages(doc, order);
+    copied.forEach(p => newDoc.addPage(p));
+    return { buffer: this.toBuffer(await newDoc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  async extractPageRange(buffer: Buffer, pagesStr: string): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const indices = this.parseRanges(pagesStr, total).flat();
+    const newDoc = await PDFDocument.create();
+    const copied = await newDoc.copyPages(doc, indices);
+    copied.forEach(p => newDoc.addPage(p));
+    return { buffer: this.toBuffer(await newDoc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  async reversePages(buffer: Buffer): Promise<PdfResult> {
+    const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const total = doc.getPageCount();
+    const reversed = Array.from({ length: total }, (_, i) => total - 1 - i);
+    const newDoc = await PDFDocument.create();
+    const copied = await newDoc.copyPages(doc, reversed);
+    copied.forEach(p => newDoc.addPage(p));
+    return { buffer: this.toBuffer(await newDoc.save()), mime: 'application/pdf', ext: 'pdf' };
   }
 
   /* ═══════════════════════════════════════════════════════════════════════

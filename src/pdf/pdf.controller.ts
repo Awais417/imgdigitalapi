@@ -82,6 +82,134 @@ export class PdfController {
     }
   }
 
+  @Post('selective-merge')
+  @UseInterceptors(FilesInterceptor('files'))
+  async selectiveMerge(
+    @UploadedFiles() files: MFile[],
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!files?.length) return this.err(res, 400, 'No files uploaded.');
+    try {
+      const result = await this.svc.selectiveMerge(files.map(f => f.buffer), body.page_ranges ?? '');
+      this.reply(res, result, 'merged');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('split-by-size')
+  @UseInterceptors(FileInterceptor('file'))
+  async splitBySize(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.splitBySize(file.buffer, parseFloat(body.max_size_mb ?? '5'));
+      this.reply(res, result, 'split');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('split-by-bookmark')
+  @UseInterceptors(FileInterceptor('file'))
+  async splitByBookmark(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.splitByBookmark(file.buffer, body.bookmark_level ?? '1');
+      this.reply(res, result, 'split');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('delete-pages')
+  @UseInterceptors(FileInterceptor('file'))
+  async deletePages(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.deletePages(file.buffer, body.pages ?? '');
+      this.reply(res, result, 'output');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('rotate-pages')
+  @UseInterceptors(FileInterceptor('file'))
+  async rotatePages(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.rotatePages(
+        file.buffer,
+        body.pages ?? 'all',
+        parseInt(body.rotation ?? '90', 10),
+      );
+      this.reply(res, result, 'rotated');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('reorder-pages')
+  @UseInterceptors(FileInterceptor('file'))
+  async reorderPages(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.reorderPages(file.buffer, body.order ?? '');
+      this.reply(res, result, 'reordered');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('extract-pages')
+  @UseInterceptors(FileInterceptor('file'))
+  async extractPageRange(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.extractPageRange(file.buffer, body.pages ?? '1-999');
+      this.reply(res, result, 'extracted');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  @Post('reverse-pages')
+  @UseInterceptors(FileInterceptor('file'))
+  async reversePages(@UploadedFile() file: MFile, @Res() res: Response) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.reversePages(file.buffer);
+      this.reply(res, result, 'reversed');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
   /* ═══════════════════════════════════════════════════════════════════════
      OPTIMIZE
   ═══════════════════════════════════════════════════════════════════════ */
