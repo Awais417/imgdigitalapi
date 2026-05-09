@@ -13,6 +13,9 @@ import {
 } from 'pdf-lib';
 import JSZip from 'jszip';
 import sharp from 'sharp';
+import * as mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
+import { parse as parseHtml } from 'node-html-parser';
 
 // pdf-parse: CommonJS module – use default import (esModuleInterop handles it)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1007,5 +1010,217 @@ export class PdfService {
     }
 
     throw new BadRequestException(`Unknown action "${action}". Use list, remove, or rename.`);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     CONVERT TO PDF
+  ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Shared helper – converts a plain-text string into a paginated A4 PDF.
+   */
+  /**
+   * Strip characters that WinAnsiEncoding (used by all pdf-lib standard fonts)
+   * cannot encode.  Converts common Unicode punctuation/symbols to ASCII
+   * equivalents first, then removes anything outside the 0x00–0xFF range.
+   */
+  private sanitizeForPdf(text: string): string {
+    return text
+      // Smart / curly quotes → straight
+      .replace(/[\u2018\u2019\u02BC]/g, "'")
+      .replace(/[\u201C\u201D]/g, '"')
+      // Dashes
+      .replace(/\u2013/g, '-')
+      .replace(/\u2014/g, '--')
+      // Ellipsis, bullet, degree, check, cross
+      .replace(/\u2026/g, '...')
+      .replace(/[\u2022\u2023\u25CF\u25E6\u2043]/g, '*')
+      .replace(/\u00B0/g, ' deg')
+      .replace(/\u2713/g, '[v]')
+      .replace(/\u2717/g, '[x]')
+      // Non-breaking / zero-width spaces
+      .replace(/[\u00A0\u200B\uFEFF]/g, ' ')
+      // Copyright, trademark, registered
+      .replace(/\u00A9/g, '(c)')
+      .replace(/\u00AE/g, '(R)')
+      .replace(/\u2122/g, '(TM)')
+      // Arrows
+      .replace(/\u2192/g, '->')
+      .replace(/\u2190/g, '<-')
+      .replace(/\u2194/g, '<->')
+      // Strip everything that WinAnsi still cannot encode
+      // (private-use area U+E000–U+F8FF, surrogates, and anything > 0xFF
+      //  that wasn't already replaced above)
+      .replace(/[\uE000-\uF8FF]/g, '')    // PUA — Wingdings/Symbol glyphs live here
+      .replace(/[^\x09\x0A\x0D\x20-\xFF]/g, ''); // keep tab, LF, CR, space-tilde + Latin-1
+  }
+
+  private async renderTextAsPdf(text: string, title = 'Document'): Promise<PDFDocument> {
+    const clean  = this.sanitizeForPdf(text);
+    const doc  = await PDFDocument.create();
+    doc.setTitle(title);
+    doc.setProducer('ImageDigitalHub');
+
+    const font       = await doc.embedFont(StandardFonts.Helvetica);
+    const fontSize   = 11;
+    const margin     = 50;
+    const pageW      = 595;   // A4 width  (points)
+    const pageH      = 842;   // A4 height (points)
+    const lineH      = fontSize * 1.5;
+    const maxW       = pageW - margin * 2;
+    const linesPerPg = Math.floor((pageH - margin * 2) / lineH);
+
+    // Word-wrap every input line
+    const wrapped: string[] = [];
+    for (const raw of clean.split('\n')) {
+      if (!raw.trim()) { wrapped.push(''); continue; }
+      const words = raw.split(' ');
+      let cur = '';
+      for (const w of words) {
+        const candidate = cur ? `${cur} ${w}` : w;
+        if (font.widthOfTextAtSize(candidate, fontSize) > maxW && cur) {
+          wrapped.push(cur);
+          cur = w;
+        } else {
+          cur = candidate;
+        }
+      }
+      if (cur) wrapped.push(cur);
+    }
+
+    // Create pages
+    for (let i = 0; i < wrapped.length; i += linesPerPg) {
+      const page  = doc.addPage([pageW, pageH]);
+      const chunk = wrapped.slice(i, i + linesPerPg);
+      chunk.forEach((line, j) => {
+        if (!line.trim()) return;
+        page.drawText(line, {
+          x: margin,
+          y: pageH - margin - j * lineH,
+          size: fontSize,
+          font,
+          color: rgb(0, 0, 0),
+        });
+      });
+    }
+
+    if (doc.getPageCount() === 0) doc.addPage([pageW, pageH]);
+    return doc;
+  }
+
+  /** Route /pdf/office-to-pdf — dispatches by file extension. */
+  async officeToPdf(buffer: Buffer, ext: string): Promise<PdfResult> {
+    switch (ext) {
+      case 'docx':
+      case 'doc':
+        return this.wordToPdf(buffer);
+      case 'xlsx':
+      case 'xls':
+        return this.excelToPdf(buffer);
+      case 'pptx':
+      case 'ppt':
+        return this.pptToPdf(buffer);
+      case 'rtf':
+        return this.rtfToPdf(buffer);
+      default:
+        throw new BadRequestException(
+          `Unsupported format ".${ext}". Supported: docx, doc, xlsx, xls, pptx, ppt, rtf`,
+        );
+    }
+  }
+
+  /** DOCX / DOC → PDF via mammoth text extraction. */
+  private async wordToPdf(buffer: Buffer): Promise<PdfResult> {
+    const { value: text } = await mammoth.extractRawText({ buffer });
+    const doc = await this.renderTextAsPdf(text || '(Empty document)', 'Word Document');
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  /** XLSX / XLS → PDF — renders each sheet as a columnar text table. */
+  private async excelToPdf(buffer: Buffer): Promise<PdfResult> {
+    const wb = XLSX.read(buffer, { type: 'buffer' });
+    let text = '';
+    for (const sheetName of wb.SheetNames) {
+      text += `Sheet: ${sheetName}\n${'─'.repeat(50)}\n`;
+      const rows = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[sheetName], {
+        header: 1,
+        defval: '',
+      });
+      for (const row of rows) {
+        text += (row as string[]).map(c => String(c ?? '').padEnd(18)).join('  ').trimEnd() + '\n';
+      }
+      text += '\n';
+    }
+    const doc = await this.renderTextAsPdf(text || '(Empty spreadsheet)', 'Spreadsheet');
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  /** PPTX / PPT → PDF — extracts text from slide XML using JSZip. */
+  private async pptToPdf(buffer: Buffer): Promise<PdfResult> {
+    const zip        = await JSZip.loadAsync(buffer);
+    const slideFiles = Object.keys(zip.files)
+      .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+      .sort((a, b) => {
+        const na = parseInt(a.match(/\d+/)?.[0] ?? '0', 10);
+        const nb = parseInt(b.match(/\d+/)?.[0] ?? '0', 10);
+        return na - nb;
+      });
+
+    let text = '';
+    for (let i = 0; i < slideFiles.length; i++) {
+      const xml     = await zip.files[slideFiles[i]].async('text');
+      const matches = xml.match(/<a:t[^>]*>([^<]*)<\/a:t>/g) ?? [];
+      const slide   = matches.map(m => m.replace(/<[^>]+>/g, '').trim()).filter(Boolean).join(' ');
+      if (slide) text += `Slide ${i + 1}\n${'─'.repeat(30)}\n${slide}\n\n`;
+    }
+    const doc = await this.renderTextAsPdf(text || '(No text content found in presentation)', 'Presentation');
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  /** RTF → PDF — strips RTF control codes to extract plain text. */
+  private async rtfToPdf(buffer: Buffer): Promise<PdfResult> {
+    const rtf = buffer.toString('latin1');
+    const text = rtf
+      .replace(/\{\\\*[^}]*\}/g, '')                // remove \* groups
+      .replace(/\\[a-z]+[-0-9]* ?/gi, ' ')           // strip control words
+      .replace(/[{}\\]/g, '')                         // remove braces and backslashes
+      .replace(/[ \t]{2,}/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    const doc = await this.renderTextAsPdf(text || '(No readable content in RTF)', 'RTF Document');
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  /** HTML → PDF — strips tags with node-html-parser, renders plain text. */
+  async htmlToPdf(buffer: Buffer): Promise<PdfResult> {
+    const html = buffer.toString('utf-8');
+    const root = parseHtml(html);
+    root.querySelectorAll('script, style, head').forEach(el => el.remove());
+    const text = (root.structuredText ?? root.text)
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    const doc = await this.renderTextAsPdf(text || '(Empty HTML document)', 'HTML Document');
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+  }
+
+  /** EPUB → PDF — unzips the EPUB, extracts HTML chapter text with node-html-parser. */
+  async epubToPdf(buffer: Buffer): Promise<PdfResult> {
+    const zip       = await JSZip.loadAsync(buffer);
+    const htmlFiles = Object.keys(zip.files)
+      .filter(n => /\.(html|xhtml)$/i.test(n))
+      .sort();
+
+    let text = '';
+    for (const fileName of htmlFiles) {
+      const content = await zip.files[fileName].async('text');
+      const root    = parseHtml(content);
+      root.querySelectorAll('script, style').forEach(el => el.remove());
+      const chapter = (root.structuredText ?? root.text)
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      if (chapter) text += chapter + '\n\n';
+    }
+    const doc = await this.renderTextAsPdf(text || '(No readable content in EPUB)', 'eBook');
+    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
   }
 }

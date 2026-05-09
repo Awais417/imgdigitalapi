@@ -265,11 +265,13 @@ export class PdfController {
   @UseInterceptors(FileInterceptor('file'))
   async officeToPdf(@UploadedFile() file: MFile, @Res() res: Response) {
     if (!file) return this.err(res, 400, 'No file uploaded.');
-    this.notImplemented(
-      res,
-      'Office-to-PDF conversion requires LibreOffice on the server. ' +
-      'Install LibreOffice and use: libreoffice --headless --convert-to pdf input.docx',
-    );
+    try {
+      const ext    = (file.originalname ?? '').split('.').pop()?.toLowerCase() ?? '';
+      const result = await this.svc.officeToPdf(file.buffer, ext);
+      this.reply(res, result, 'converted');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
   }
 
   @Post('image-to-pdf')
@@ -290,17 +292,25 @@ export class PdfController {
   @Post('html-to-pdf')
   @UseInterceptors(FileInterceptor('file'))
   async htmlToPdf(@UploadedFile() file: MFile, @Res() res: Response) {
-    this.notImplemented(
-      res,
-      'HTML-to-PDF requires Puppeteer. Run: npm install puppeteer, then implement rendering in PdfService.',
-    );
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.htmlToPdf(file.buffer);
+      this.reply(res, result, 'converted');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
   }
 
   @Post('epub-to-pdf')
   @UseInterceptors(FileInterceptor('file'))
   async epubToPdf(@UploadedFile() file: MFile, @Res() res: Response) {
     if (!file) return this.err(res, 400, 'No file uploaded.');
-    this.notImplemented(res, 'EPUB-to-PDF conversion requires Calibre (ebook-convert) or Pandoc on the server.');
+    try {
+      const result = await this.svc.epubToPdf(file.buffer);
+      this.reply(res, result, 'converted');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
   }
 
   @Post('cad-to-pdf')
