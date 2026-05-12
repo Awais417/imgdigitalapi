@@ -2545,4 +2545,143 @@ export class PdfService {
       await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
   }
+
+  /* ─── PDF to PowerPoint ────────────────────────────────────────────────── */
+  async pdfToPptx(buffer: Buffer): Promise<PdfResult> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js') as any;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createCanvas } = require('canvas') as { createCanvas: (w: number, h: number) => any };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const PptxGenJS = require('pptxgenjs') as any;
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+
+    const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer), verbosity: 0 });
+    const pdfDoc = await loadingTask.promise;
+
+    const pptx = new PptxGenJS();
+
+    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+      const page     = await pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const w        = Math.ceil(viewport.width);
+      const h        = Math.ceil(viewport.height);
+
+      const canvas  = createCanvas(w, h);
+      const context = canvas.getContext('2d');
+
+      const canvasFactory = {
+        create: (cw: number, ch: number) => {
+          const c = createCanvas(cw, ch);
+          return { canvas: c, context: c.getContext('2d') };
+        },
+        reset: (pair: any, cw: number, ch: number) => {
+          pair.canvas.width = cw; pair.canvas.height = ch;
+        },
+        destroy: (pair: any) => {
+          pair.canvas.width = 0; pair.canvas.height = 0;
+        },
+      };
+
+      await page.render({ canvasContext: context, viewport, canvasFactory }).promise;
+
+      const imgBase64 = canvas.toBuffer('image/jpeg', { quality: 0.88 }).toString('base64');
+
+      const aspectRatio = h / w;
+      const slideW = 10;
+      const slideH = parseFloat((slideW * aspectRatio).toFixed(4));
+
+      pptx.defineLayout({ name: `L${pageNum}`, width: slideW, height: slideH });
+      const slide = pptx.addSlide();
+      slide.addImage({
+        data: `data:image/jpeg;base64,${imgBase64}`,
+        x: 0, y: 0,
+        w: slideW,
+        h: slideH,
+      });
+    }
+
+    const pptxBuffer = this.toBuffer(await pptx.write({ outputType: 'nodebuffer' }) as Buffer);
+    return {
+      buffer: pptxBuffer,
+      mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      ext: 'pptx',
+    };
+  }
+
+  /* ─── Translate PDF ─────────────────────────────────────────────────────── */
+  async translatePdf(buffer: Buffer, targetLang: string): Promise<PdfResult> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ text: string }>;
+
+    const lang = (targetLang || 'es').replace(/[^a-z-]/gi, '').slice(0, 10);
+
+    const parsed = await pdfParse(buffer);
+    const rawText = parsed.text || '';
+
+    if (!rawText.trim()) {
+      throw new BadRequestException('No extractable text found in this PDF. Scanned/image PDFs cannot be translated.');
+    }
+
+    // Split into ≤4000-char chunks
+    const chunks: string[] = [];
+    let remaining = rawText;
+    while (remaining.length > 0) {
+      chunks.push(remaining.slice(0, 4000));
+      remaining = remaining.slice(4000);
+    }
+
+    // Translate via Google Translate unofficial endpoint
+    const translated: string[] = [];
+    for (const chunk of chunks) {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(lang)}&dt=t&q=${encodeURIComponent(chunk)}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new BadRequestException(`Translation failed (HTTP ${resp.status}). Try again later.`);
+      const data = await resp.json() as any[][];
+      const parts: string[] = (data[0] ?? []).map((seg: any[]) => seg[0] ?? '');
+      translated.push(parts.join(''));
+    }
+
+    const finalText = translated.join('\n');
+
+    // Build output PDF
+    const outDoc = await PDFDocument.create();
+    const font   = await outDoc.embedFont(StandardFonts.Helvetica);
+    const fontSize = 11;
+    const margin   = 50;
+    const pageWidth  = 595;
+    const pageHeight = 842;
+    const maxWidth   = pageWidth - margin * 2;
+    const lineHeight = fontSize * 1.45;
+
+    const words = finalText.split(/\s+/);
+    const lines: string[] = [];
+    let current = '';
+    for (const word of words) {
+      const test = current ? `${current} ${word}` : word;
+      const testWidth = font.widthOfTextAtSize(test, fontSize);
+      if (testWidth > maxWidth && current) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = test;
+      }
+    }
+    if (current) lines.push(current);
+
+    const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
+    for (let i = 0; i < lines.length; i += linesPerPage) {
+      const page = outDoc.addPage([pageWidth, pageHeight]);
+      const pageLines = lines.slice(i, i + linesPerPage);
+      let y = pageHeight - margin;
+      for (const line of pageLines) {
+        page.drawText(line, { x: margin, y, font, size: fontSize, color: rgb(0, 0, 0) });
+        y -= lineHeight;
+      }
+    }
+
+    const pdfBytes = await outDoc.save();
+    return { buffer: this.toBuffer(pdfBytes), mime: 'application/pdf', ext: 'pdf' };
+  }
 }

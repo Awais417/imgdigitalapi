@@ -1050,4 +1050,60 @@ export class PdfController {
       this.err(res, 500, (e as Error).message);
     }
   }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     PDF TO POWERPOINT
+  ═══════════════════════════════════════════════════════════════════════ */
+  @Post('pdf-to-pptx')
+  @UseInterceptors(FileInterceptor('file'))
+  async pdfToPptx(
+    @UploadedFile() file: MFile,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.pdfToPptx(file.buffer);
+      this.reply(res, result, 'presentation');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     TRANSLATE PDF
+  ═══════════════════════════════════════════════════════════════════════ */
+  @Post('translate-pdf')
+  @UseInterceptors(FileInterceptor('file'))
+  async translatePdf(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.translatePdf(file.buffer, body.target_lang ?? 'es');
+      this.reply(res, result, 'translated');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     ORGANIZE PDF  (alias for reorder-pages — same service method)
+  ═══════════════════════════════════════════════════════════════════════ */
+  @Post('organize-pdf')
+  @UseInterceptors(FileInterceptor('file'))
+  async organizePdf(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const result = await this.svc.reorderPages(file.buffer, body.pages ?? '');
+      this.reply(res, result, 'organized');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
 }
