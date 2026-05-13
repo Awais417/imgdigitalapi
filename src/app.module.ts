@@ -1,7 +1,6 @@
 import {
   Module,
   MiddlewareConsumer,
-  RequestMethod,
 } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -9,10 +8,14 @@ import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { ImageModule } from './image/image.module';
 import { PdfModule } from './pdf/pdf.module';
+import { PdfController } from './pdf/pdf.controller';
+import { ImageController } from './image/image.controller';
 import { DestroyModule } from './destroy/destroy.module';
+import { AdminModule } from './admin/admin.module';
 import { UsersModule } from './users/users.module';
 import { ConversionsModule } from './conversions/conversions.module';
 import { S3Module } from './s3/s3.module';
+import { ConversionTrackingModule } from './middleware/conversion-tracking.module';
 import { ConversionTrackingMiddleware } from './middleware/conversion-tracking.middleware';
 import { User } from './users/user.entity';
 import { ConversionRecord } from './conversions/conversion.entity';
@@ -45,17 +48,16 @@ import { ConversionRecord } from './conversions/conversion.entity';
     ImageModule,
     PdfModule,
     DestroyModule,
+    AdminModule,
+    ConversionTrackingModule,
   ],
   controllers: [AppController],
-  providers: [ConversionTrackingMiddleware],
+  providers: [],
 })
 export class AppModule {
   configure(consumer: MiddlewareConsumer) {
     consumer
       .apply(ConversionTrackingMiddleware)
-      .forRoutes(
-        { path: 'pdf/*path', method: RequestMethod.POST },
-        { path: 'image/*path', method: RequestMethod.POST },
-      );
+      .forRoutes(PdfController, ImageController);
   }
 }

@@ -39,6 +39,12 @@ export class AuthController {
     return req.user;
   }
 
+  /** One-time bootstrap: create/promote admin using DESTROY_SECRET */
+  @Post('bootstrap-admin')
+  bootstrapAdmin(@Body() body: { email: string; username: string; password: string; secret: string }) {
+    return this.authService.bootstrapAdmin(body.email, body.username, body.password, body.secret);
+  }
+
   /* ── Google OAuth ──────────────────────────────────────────────────────── */
   @Get('google')
   @UseGuards(AuthGuard('google'))

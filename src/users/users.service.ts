@@ -34,6 +34,18 @@ export class UsersService {
     return this.repo.save(user);
   }
 
+  /** Find existing user by email and set admin role, or create fresh admin account */
+  async createOrPromoteAdmin(email: string, username: string, plainPassword: string): Promise<User> {
+    let user = await this.repo.findOne({ where: { email } });
+    if (user) {
+      user.role = 'admin';
+      return this.repo.save(user);
+    }
+    const password = await bcrypt.hash(plainPassword, 10);
+    user = this.repo.create({ email, username, password, role: 'admin' });
+    return this.repo.save(user);
+  }
+
   async findOrCreateGoogleUser(googleId: string, email: string, displayName: string): Promise<User> {
     // 1. Already linked to this Google account
     let user = await this.repo.findOne({ where: { googleId } });

@@ -23,6 +23,9 @@ export class User {
   @Column({ nullable: true, unique: true })
   googleId: string;
 
+  @Column({ default: 'user' })
+  role: string; // 'user' | 'admin'
+
   @CreateDateColumn()
   createdAt: Date;
 

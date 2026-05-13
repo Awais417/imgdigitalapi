@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -15,8 +15,8 @@ export class AuthService {
   async signup(email: string, username: string, password: string) {
     const user = await this.usersService.create(email, username, password);
     return {
-      ...this.generateTokens(user.id, user.username),
-      user: { id: user.id, email: user.email, username: user.username },
+      ...this.generateTokens(user.id, user.username, user.role),
+      user: { id: user.id, email: user.email, username: user.username, role: user.role },
     };
   }
 
@@ -29,20 +29,30 @@ export class AuthService {
     if (!match) throw new UnauthorizedException('Invalid credentials');
 
     return {
-      ...this.generateTokens(user.id, user.username),
-      user: { id: user.id, email: user.email, username: user.username },
+      ...this.generateTokens(user.id, user.username, user.role),
+      user: { id: user.id, email: user.email, username: user.username, role: user.role },
     };
   }
 
-  loginWithGoogle(user: { id: number; email: string; username: string }) {
+  async bootstrapAdmin(email: string, username: string, password: string, secret: string) {
+    const expected = this.config.get<string>('DESTROY_SECRET');
+    if (!expected || secret !== expected) throw new ForbiddenException('Invalid secret');
+    const user = await this.usersService.createOrPromoteAdmin(email, username, password);
     return {
-      ...this.generateTokens(user.id, user.username),
-      user: { id: user.id, email: user.email, username: user.username },
+      ...this.generateTokens(user.id, user.username, user.role),
+      user: { id: user.id, email: user.email, username: user.username, role: user.role },
     };
   }
 
-  private generateTokens(userId: number, username: string) {
-    const payload = { username, sub: userId };
+  loginWithGoogle(user: { id: number; email: string; username: string; role: string }) {
+    return {
+      ...this.generateTokens(user.id, user.username, user.role),
+      user: { id: user.id, email: user.email, username: user.username, role: user.role },
+    };
+  }
+
+  private generateTokens(userId: number, username: string, role: string) {
+    const payload = { username, sub: userId, role };
     return {
       access_token: this.jwtService.sign(payload),
       refresh_token: this.jwtService.sign(payload, {

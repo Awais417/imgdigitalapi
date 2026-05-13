@@ -27,7 +27,6 @@ export class ConversionTrackingMiddleware implements NestMiddleware {
     (res as any).send = (body: any): Response => {
       const contentDisposition = res.getHeader('content-disposition') as string;
       const contentType = (res.getHeader('content-type') as string | undefined) ?? 'application/octet-stream';
-
       if (Buffer.isBuffer(body) && contentDisposition?.includes('attachment')) {
         this.trackInBackground(req, body, contentDisposition, contentType).catch(() => {});
       }
@@ -59,6 +58,14 @@ export class ConversionTrackingMiddleware implements NestMiddleware {
       const nameMatch = contentDisposition.match(/filename="?([^";\n]+)"?/);
       const outputFileName = nameMatch?.[1]?.trim() ?? `${toolSlug}-output`;
 
+      // Original filename from Multer-parsed request
+      const multerFile = (req as any).file as { originalname?: string } | undefined;
+      const multerFiles = (req as any).files as Array<{ originalname?: string }> | undefined;
+      const originalFileName =
+        multerFile?.originalname ??
+        multerFiles?.[0]?.originalname ??
+        '';
+
       // S3 key: conversions/{userId}/{timestamp}-{filename}
       const s3Key = `conversions/${userId}/${Date.now()}-${outputFileName}`;
 
@@ -67,7 +74,7 @@ export class ConversionTrackingMiddleware implements NestMiddleware {
       await this.conversionsService!.save({
         userId,
         toolSlug,
-        originalFileName: '',
+        originalFileName,
         outputFileName,
         s3Key,
         s3Url,
