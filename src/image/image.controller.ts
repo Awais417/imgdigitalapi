@@ -326,6 +326,23 @@ export class ImageController {
      II-D.  CONTENT EDITING
   ═══════════════════════════════════════════════════════════════════════ */
 
+  @Post('remove-watermark')
+  @UseInterceptors(FileInterceptor('file'))
+  async removeWatermark(
+    @UploadedFile() file: MFile,
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ) {
+    if (!file) return this.err(res, 400, 'No file uploaded.');
+    try {
+      const strength = parseInt(body.strength ?? '60', 10);
+      const result = await this.svc.removeWatermark(file.buffer, strength);
+      this.reply(res, result, 'watermark-removed');
+    } catch (e) {
+      this.err(res, 500, (e as Error).message);
+    }
+  }
+
   /** Remove Background — requires an AI service (e.g. remove.bg API key). */
   @Post('remove-background')
   @UseInterceptors(FileInterceptor('file'))

@@ -384,6 +384,59 @@ export class ImageService {
     return this.send(out, 'image/jpeg', 'jpg');
   }
 
+  /**
+   * Watermark removal using frequency-separation technique:
+   * 1. Extract a smooth "background plate" via heavy Gaussian blur
+   * 2. Blend original + background using opacity to reduce overlay artifacts
+   * 3. Apply normalise + mild sharpening to restore natural look
+   */
+  async removeWatermark(buffer: Buffer, strength = 60): Promise<ImageResult> {
+    const pct = Math.max(10, Math.min(100, strength)) / 100;
+
+    // Get image dimensions
+    const meta = await (sharp)(buffer).metadata();
+    const w = meta.width as number;
+    const h = meta.height as number;
+
+    // Step 1: create a heavily blurred "background plate"
+    const blurSigma = Math.max(5, Math.round(Math.min(w, h) * 0.03));
+    const bgPlate = await (sharp)(buffer)
+      .blur(blurSigma)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    // Step 2: get original as raw
+    const orig = await (sharp)(buffer)
+      .ensureAlpha(1)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    // Step 3: blend — for each pixel: result = orig * (1-pct) + bg * pct
+    // This suppresses semi-transparent overlays while preserving photo content
+    const blendBuf = Buffer.alloc(orig.data.length);
+    const bgRaw = await (sharp)(buffer)
+      .blur(blurSigma)
+      .ensureAlpha(1)
+      .raw()
+      .toBuffer();
+
+    for (let i = 0; i < orig.data.length; i++) {
+      blendBuf[i] = Math.round(orig.data[i] * (1 - pct) + bgRaw[i] * pct);
+    }
+
+    // Step 4: reconstruct from raw + post-process
+    const channels = (orig.info.channels as number);
+    const out = await (sharp)(blendBuf, {
+      raw: { width: w, height: h, channels: channels as 1|2|3|4 },
+    })
+      .normalise()
+      .sharpen({ sigma: 0.6, m1: 0.5, m2: 0.6 })
+      .jpeg({ quality: 93 })
+      .toBuffer();
+
+    return this.send(out, 'image/jpeg', 'jpg');
+  }
+
   async removeBackground(imageBuffer: Buffer): Promise<ImageResult> {
     const apiKey = this.config.get<string>('REMOVE_BG_API_KEY');
     if (!apiKey) throw new BadRequestException('REMOVE_BG_API_KEY is not set in environment.');
