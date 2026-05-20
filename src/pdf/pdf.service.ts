@@ -2774,8 +2774,9 @@ export class PdfService {
 
     // Pixels above this value get pushed toward/to white.
     // Content text is typically < 100, watermarks typically 130-230.
-    const threshold = Math.round(210 - pct * 60); // 210 at 0%, 150 at 100%
-    const linearA   = 255 / threshold;             // multiply so threshold maps to 255
+    // Pixels with luminance above this are treated as watermark and set to white.
+    // Content text is typically < 100 luminance; watermarks typically 130–230.
+    const threshold = Math.round(210 - pct * 60); // ~210 at 0% strength, ~150 at 100%
 
     const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js') as any;
     const { createCanvas } = require('canvas') as { createCanvas: (w: number, h: number) => any };
@@ -2817,11 +2818,27 @@ export class PdfService {
       await page.render({ canvasContext: context, viewport, canvasFactory }).promise;
       const pageImgBuf = canvas.toBuffer('image/png');
 
-      // Linear stretch: output = linearA * input (clamped 0-255)
-      // Pixels above threshold → white; dark text (< ~100) → stays dark
-      const cleaned = await (sharp as any)(pageImgBuf)
-        .linear(linearA, 0)
-        .sharpen({ sigma: 0.5 })
+      // Selective whitening: only push light/gray pixels (watermarks) to white.
+      // Dark pixels (text, graphics) are left exactly unchanged.
+      const { data, info } = await (sharp as any)(pageImgBuf)
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const channels: number = info.channels;
+      for (let p = 0; p < data.length; p += channels) {
+        const lum = data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114;
+        if (lum > threshold) {
+          data[p] = 255;
+          data[p + 1] = 255;
+          data[p + 2] = 255;
+          if (channels === 4) data[p + 3] = 255;
+        }
+        // else: pixel stays exactly as rendered — text/graphics untouched
+      }
+
+      const cleaned = await (sharp as any)(data, {
+        raw: { width: info.width, height: info.height, channels },
+      })
         .png()
         .toBuffer();
 
