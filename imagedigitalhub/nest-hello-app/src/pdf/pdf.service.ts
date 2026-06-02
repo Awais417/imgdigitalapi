@@ -51,6 +51,37 @@ export class PdfService {
     return Buffer.from(u8);
   }
 
+  /**
+   * Strip characters that pdf-lib's WinAnsi (Helvetica) font cannot encode.
+   * - Invisible / zero-width chars (U+200B, U+FEFF, etc.) → removed
+   * - Latin + WinAnsi extras (smart quotes, dashes, euro …) → kept as-is
+   * - Everything else (CJK, Arabic, Cyrillic beyond U+00FF …) → '?'
+   */
+  private sanitizeWinAnsi(text: string): string {
+    const WINEXTRA = new Set([
+      0x0152,0x0153,0x0160,0x0161,0x0178,0x017D,0x017E,
+      0x0192,0x02C6,0x02DC,
+      0x2013,0x2014,0x2018,0x2019,0x201A,0x201C,0x201D,0x201E,
+      0x2020,0x2021,0x2022,0x2026,0x2030,0x2039,0x203A,0x20AC,0x2122,
+    ]);
+    return Array.from(text).map(ch => {
+      const cp = ch.codePointAt(0) ?? 0;
+      // invisible / zero-width → drop silently
+      if ([0x00AD,0x200B,0x200C,0x200D,0x200E,0x200F,
+           0x2028,0x2029,0x2060,0xFEFF].includes(cp)) return '';
+      // keep newlines and tabs
+      if (cp === 0x09 || cp === 0x0A || cp === 0x0D) return ch;
+      // other control chars → drop
+      if (cp < 0x20) return '';
+      // printable ASCII + Latin-1 Supplement: always WinAnsi-safe
+      if (cp <= 0xFF) return ch;
+      // WinAnsi extended code points
+      if (WINEXTRA.has(cp)) return ch;
+      // everything else (CJK, Arabic, Cyrillic accents, emoji …) → '?'
+      return '?';
+    }).join('');
+  }
+
   /** Parse "1-3, 5, 7-9" into arrays of 0-based page indices. */
   private parseRanges(rangesStr: string, total: number): number[][] {
     const result: number[][] = [];
@@ -69,6 +100,211 @@ export class PdfService {
       }
     }
     return result.length ? result : [Array.from({ length: total }, (_, i) => i)];
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     PDF INFO & PAGE PREVIEW
+  ═══════════════════════════════════════════════════════════════════════ */
+
+  async pdfInfo(buffer: Buffer): Promise<{ pageCount: number; width: number; height: number }> {
+    const doc  = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    const page = doc.getPage(0);
+    return { pageCount: doc.getPageCount(), width: page.getWidth(), height: page.getHeight() };
+  }
+
+  async renderPagePreview(buffer: Buffer, pageNum = 1, scale = 1.5): Promise<Buffer> {
+    const pdfjsLib    = require('pdfjs-dist/legacy/build/pdf.js') as any;
+    const { createCanvas } = require('canvas') as { createCanvas: (w: number, h: number) => any };
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+
+    const pdfDoc  = await pdfjsLib.getDocument({ data: new Uint8Array(buffer), verbosity: 0 }).promise;
+    const page    = await pdfDoc.getPage(Math.max(1, Math.min(pageNum, pdfDoc.numPages)));
+    const vp      = page.getViewport({ scale });
+    const w       = Math.round(vp.width);
+    const h       = Math.round(vp.height);
+
+    const canvas  = createCanvas(w, h);
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, w, h);
+
+    const canvasFactory = {
+      create:  (cw: number, ch: number) => {
+        const c = createCanvas(cw, ch); const ctx = c.getContext('2d');
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cw, ch);
+        return { canvas: c, context: ctx };
+      },
+      reset:   (pair: any, cw: number, ch: number) => {
+        pair.canvas.width = cw; pair.canvas.height = ch;
+        pair.context.fillStyle = '#ffffff'; pair.context.fillRect(0, 0, cw, ch);
+      },
+      destroy: (pair: any) => { pair.canvas.width = 0; pair.canvas.height = 0; },
+    };
+
+    await page.render({ canvasContext: context, viewport: vp, canvasFactory }).promise;
+    return canvas.toBuffer('image/png');
+  }
+
+  /** Apply erase (white rects) + text elements to a PDF.
+   *  Erase  → pdf-lib drawRectangle (white fill)
+   *  Text   → iLovePDF editpdf API (proper font rendering, Unicode support)
+   *           Falls back to pdf-lib Helvetica if API key is not configured.
+   */
+  async editPdfMulti(
+    buffer: Buffer,
+    elements: Array<{
+      type?: 'text' | 'erase';
+      text?: string; page: number; x: number; y: number;
+      font_size?: number; font_color?: string; opacity?: number; rotation?: number;
+      width?: number; height?: number;
+    }>,
+  ): Promise<PdfResult> {
+    const textEls  = elements.filter(e => !e.type || e.type === 'text');
+    const eraseEls = elements.filter(e => e.type === 'erase');
+
+    let current = buffer;
+
+    /* ── Step 1: white-rectangle erasing via pdf-lib ─────────────────────── */
+    if (eraseEls.length > 0) {
+      const doc   = await PDFDocument.load(current, { ignoreEncryption: true });
+      const pages = doc.getPages();
+      for (const el of eraseEls) {
+        const pi   = Math.max(0, Math.min((el.page ?? 1) - 1, pages.length - 1));
+        const page = pages[pi];
+        page.drawRectangle({
+          x: el.x, y: el.y,
+          width:  el.width  ?? 80,
+          height: el.height ?? 20,
+          color: rgb(1, 1, 1),
+          opacity: 1,
+          borderWidth: 0,
+        });
+      }
+      current = this.toBuffer(await doc.save());
+    }
+
+    /* ── Step 2: text adding via iLovePDF editpdf API ────────────────────── */
+    if (textEls.length > 0) {
+      const publicKey = process.env.ILOVEPDF_PUBLIC_KEY;
+
+      if (publicKey) {
+        /* Get page heights for coordinate conversion (pdf-lib bottom-left → iLovePDF top-left) */
+        const pdfDoc   = await PDFDocument.load(current, { ignoreEncryption: true });
+        const pageDims = pdfDoc.getPages().map(p => ({ w: p.getWidth(), h: p.getHeight() }));
+
+        /* 1. Auth */
+        const authRes = await fetch('https://api.ilovepdf.com/v1/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ public_key: publicKey }),
+        });
+        if (!authRes.ok) throw new Error(`iLovePDF auth failed: ${await authRes.text()}`);
+        const { token } = await authRes.json() as { token: string };
+
+        /* 2. Start editpdf task */
+        const startRes = await fetch('https://api.ilovepdf.com/v1/start/editpdf', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!startRes.ok) throw new Error(`iLovePDF start failed: ${await startRes.text()}`);
+        const { server, task } = await startRes.json() as { server: string; task: string };
+
+        /* 3. Upload file */
+        const ab = new ArrayBuffer(current.byteLength);
+        new Uint8Array(ab).set(current);
+        const uploadForm = new FormData();
+        uploadForm.append('task', task);
+        uploadForm.append('file', new Blob([ab], { type: 'application/pdf' }), 'document.pdf');
+        const uploadRes = await fetch(`https://${server}/v1/upload`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: uploadForm,
+        });
+        if (!uploadRes.ok) throw new Error(`iLovePDF upload failed: ${await uploadRes.text()}`);
+        const { server_filename } = await uploadRes.json() as { server_filename: string };
+
+        /* 4. Build iLovePDF elements
+         *    Coordinate conversion: EditPdfClient sends y in PDF bottom-left pts.
+         *    iLovePDF expects y from the TOP of the page.
+         *    → ilovepdfY = pageHeight - element.y
+         */
+        const ilovepdfElements = textEls.map(el => {
+          const pi     = Math.max(0, Math.min((el.page ?? 1) - 1, pageDims.length - 1));
+          const pageH  = pageDims[pi]?.h ?? 842;
+          const color  = (el.font_color ?? '#000000').replace('#', '');
+          return {
+            type:              'text',
+            text:               el.text || '',
+            pages:             { ranges: [{ start: el.page ?? 1, end: el.page ?? 1 }], rangeType: 'fixed' },
+            position:          { x: el.x, y: pageH - el.y },
+            font_family:       'Arial',
+            font_style:        'Regular',
+            font_size:          el.font_size  ?? 14,
+            font_color:         color,
+            opacity:            el.opacity    ?? 100,
+            font_weight:        400,
+            font_style_italic:  false,
+            text_decoration:   'null',
+            align:             'left',
+            rotation:           el.rotation   ?? 0,
+          };
+        });
+
+        /* 5. Process */
+        const processRes = await fetch(`https://${server}/v1/process`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task,
+            tool:     'editpdf',
+            files:    [{ server_filename, filename: 'document.pdf' }],
+            elements: ilovepdfElements,
+          }),
+        });
+        if (!processRes.ok) throw new Error(`iLovePDF process failed: ${await processRes.text()}`);
+
+        /* 6. Download */
+        const dlRes = await fetch(`https://${server}/v1/download/${task}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!dlRes.ok) throw new Error(`iLovePDF download failed: ${await dlRes.text()}`);
+
+        const contentType = dlRes.headers.get('content-type') ?? '';
+        const rawBuffer   = Buffer.from(await dlRes.arrayBuffer());
+
+        if (contentType.includes('zip') || contentType.includes('octet-stream')) {
+          try {
+            const zip      = await JSZip.loadAsync(rawBuffer);
+            const pdfEntry = Object.values(zip.files).find(f => f.name.endsWith('.pdf'));
+            current = pdfEntry
+              ? Buffer.from(await pdfEntry.async('arraybuffer'))
+              : rawBuffer;
+          } catch { current = rawBuffer; }
+        } else {
+          current = rawBuffer;
+        }
+
+      } else {
+        /* ── Fallback: pdf-lib Helvetica (no API key configured) ─────────── */
+        const doc   = await PDFDocument.load(current, { ignoreEncryption: true });
+        const font  = await doc.embedFont(StandardFonts.Helvetica);
+        const pages = doc.getPages();
+        for (const el of textEls) {
+          const pi   = Math.max(0, Math.min((el.page ?? 1) - 1, pages.length - 1));
+          const page = pages[pi];
+          page.drawText(el.text || '', {
+            x: el.x, y: el.y,
+            size:    el.font_size  ?? 14,
+            font,
+            color:   this.hexToColor(el.font_color || '#000000'),
+            opacity: Math.max(0, Math.min(100, el.opacity ?? 100)) / 100,
+            rotate:  degrees(el.rotation ?? 0),
+          });
+        }
+        current = this.toBuffer(await doc.save());
+      }
+    }
+
+    return { buffer: current, mime: 'application/pdf', ext: 'pdf' };
   }
 
   /* ═══════════════════════════════════════════════════════════════════════
@@ -109,6 +345,14 @@ export class PdfService {
       groups = this.parseRanges(rangesStr, total);
     }
 
+    // Single group → return plain PDF (no ZIP)
+    if (groups.length === 1) {
+      const newDoc = await PDFDocument.create();
+      const copied = await newDoc.copyPages(doc, groups[0]);
+      copied.forEach(p => newDoc.addPage(p));
+      return { buffer: this.toBuffer(await newDoc.save()), mime: 'application/pdf', ext: 'pdf' };
+    }
+
     for (let i = 0; i < groups.length; i++) {
       const newDoc = await PDFDocument.create();
       const copied = await newDoc.copyPages(doc, groups[i]);
@@ -121,13 +365,22 @@ export class PdfService {
   }
 
   async selectiveMerge(buffers: Buffer[], pageRangesStr: string): Promise<PdfResult> {
+    // page_ranges uses "|" to separate per-file ranges, e.g. "1-3 | 2,4 | 1"
+    // If only one group given, apply it to every file.
+    const perFileRanges = (pageRangesStr ?? '')
+      .split('|')
+      .map(s => s.trim())
+      .filter(Boolean);
+
     const merged = await PDFDocument.create();
-    for (const buf of buffers) {
-      const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+    for (let fi = 0; fi < buffers.length; fi++) {
+      const doc   = await PDFDocument.load(buffers[fi], { ignoreEncryption: true });
       const total = doc.getPageCount();
-      const indices = !pageRangesStr?.trim()
+      // Use file-specific range if provided; fall back to first range; fall back to all pages
+      const rangeStr = perFileRanges[fi] ?? perFileRanges[0] ?? '';
+      const indices  = !rangeStr
         ? Array.from({ length: total }, (_, i) => i)
-        : this.parseRanges(pageRangesStr, total).flat();
+        : this.parseRanges(rangeStr, total).flat();
       const pages = await merged.copyPages(doc, indices);
       pages.forEach(p => merged.addPage(p));
     }
@@ -411,8 +664,50 @@ export class PdfService {
 
     await worker.terminate();
 
-    const fullText = pageTexts.join('\n\n');
-    return { buffer: Buffer.from(fullText, 'utf-8'), mime: 'text/plain', ext: 'txt' };
+    // Build a PDF with the extracted text
+    const pdfDoc = await PDFDocument.create();
+    const font   = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const FONT_SIZE = 11;
+    const MARGIN    = 50;
+    const LINE_H    = FONT_SIZE * 1.4;
+
+    for (let pi = 0; pi < pageTexts.length; pi++) {
+      const text  = pageTexts[pi];
+      const lines = text.split('\n');
+
+      // Estimate required height and break across pages if needed
+      let pageLines: string[] = [];
+      const PAGE_W = 595, PAGE_H = 842; // A4
+      const maxLines = Math.floor((PAGE_H - MARGIN * 2) / LINE_H);
+
+      let chunk: string[] = [];
+      for (const line of lines) {
+        chunk.push(line);
+        if (chunk.length >= maxLines) {
+          pageLines = chunk;
+          const pg = pdfDoc.addPage([PAGE_W, PAGE_H]);
+          let y = PAGE_H - MARGIN;
+          for (const l of pageLines) {
+            pg.drawText(l.slice(0, 100), { x: MARGIN, y, size: FONT_SIZE, font, color: rgb(0, 0, 0) });
+            y -= LINE_H;
+          }
+          chunk = [];
+        }
+      }
+      // remaining lines
+      if (chunk.length > 0) {
+        const pg = pdfDoc.addPage([PAGE_W, PAGE_H]);
+        let y = PAGE_H - MARGIN;
+        for (const l of chunk) {
+          pg.drawText(l.slice(0, 100), { x: MARGIN, y, size: FONT_SIZE, font, color: rgb(0, 0, 0) });
+          y -= LINE_H;
+        }
+      }
+    }
+
+    if (pdfDoc.getPageCount() === 0) pdfDoc.addPage([595, 842]);
+    const pdfBytes = await pdfDoc.save();
+    return { buffer: Buffer.from(pdfBytes), mime: 'application/pdf', ext: 'pdf' };
   }
 
   async pdfToExcel(pdfBuffer: Buffer, docTitle = 'Sheet1'): Promise<PdfResult> {
@@ -2088,10 +2383,10 @@ export class PdfService {
         return this.wordToPdf(buffer, ext);
       case 'xlsx':
       case 'xls':
-        return this.excelToPdf(buffer);
+        return this.excelToPdf(buffer, ext);
       case 'pptx':
       case 'ppt':
-        return this.pptToPdf(buffer);
+        return this.pptToPdf(buffer, ext);
       case 'rtf':
         return this.rtfToPdf(buffer);
       default:
@@ -2180,44 +2475,160 @@ export class PdfService {
   }
 
   /** XLSX / XLS → PDF — renders each sheet as a columnar text table. */
-  private async excelToPdf(buffer: Buffer): Promise<PdfResult> {
-    const wb = XLSX.read(buffer, { type: 'buffer' });
-    let text = '';
-    for (const sheetName of wb.SheetNames) {
-      text += `Sheet: ${sheetName}\n${'─'.repeat(50)}\n`;
-      const rows = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[sheetName], {
-        header: 1,
-        defval: '',
-      });
-      for (const row of rows) {
-        text += (row as string[]).map(c => String(c ?? '').padEnd(18)).join('  ').trimEnd() + '\n';
+  /** XLSX / XLS → PDF via iLovePDF officepdf task (preserves formatting). */
+  private async excelToPdf(buffer: Buffer, ext = 'xlsx'): Promise<PdfResult> {
+    const publicKey = process.env.ILOVEPDF_PUBLIC_KEY;
+    if (!publicKey) throw new Error('ILOVEPDF_PUBLIC_KEY not set in environment');
+
+    const filename = `spreadsheet.${ext}`;
+    const mime =
+      ext === 'xlsx'
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'application/vnd.ms-excel';
+
+    // 1. Auth
+    const authRes = await fetch('https://api.ilovepdf.com/v1/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: publicKey }),
+    });
+    if (!authRes.ok) throw new Error(`iLovePDF auth failed: ${await authRes.text()}`);
+    const { token } = (await authRes.json()) as { token: string };
+
+    // 2. Start task
+    const startRes = await fetch('https://api.ilovepdf.com/v1/start/officepdf', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!startRes.ok) throw new Error(`iLovePDF start failed: ${await startRes.text()}`);
+    const { server, task } = (await startRes.json()) as { server: string; task: string };
+
+    // 3. Upload
+    const ab = new ArrayBuffer(buffer.byteLength);
+    new Uint8Array(ab).set(buffer);
+    const uploadForm = new FormData();
+    uploadForm.append('task', task);
+    uploadForm.append('file', new Blob([ab], { type: mime }), filename);
+    const uploadRes = await fetch(`https://${server}/v1/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: uploadForm,
+    });
+    if (!uploadRes.ok) throw new Error(`iLovePDF upload failed: ${await uploadRes.text()}`);
+    const { server_filename } = (await uploadRes.json()) as { server_filename: string };
+
+    // 4. Process
+    const processRes = await fetch(`https://${server}/v1/process`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task,
+        tool: 'officepdf',
+        files: [{ server_filename, filename }],
+      }),
+    });
+    if (!processRes.ok) throw new Error(`iLovePDF process failed: ${await processRes.text()}`);
+
+    // 5. Download
+    const dlRes = await fetch(`https://${server}/v1/download/${task}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!dlRes.ok) throw new Error(`iLovePDF download failed: ${await dlRes.text()}`);
+
+    const contentType = dlRes.headers.get('content-type') ?? '';
+    const rawBuffer = Buffer.from(await dlRes.arrayBuffer());
+
+    if (contentType.includes('zip') || contentType.includes('octet-stream')) {
+      try {
+        const zip = await JSZip.loadAsync(rawBuffer);
+        const pdfEntry = Object.values(zip.files).find(f => f.name.endsWith('.pdf'));
+        if (pdfEntry) {
+          return { buffer: Buffer.from(await pdfEntry.async('arraybuffer')), mime: 'application/pdf', ext: 'pdf' };
+        }
+      } catch {
+        // not a zip — fall through
       }
-      text += '\n';
     }
-    const doc = await this.renderTextAsPdf(text || '(Empty spreadsheet)', 'Spreadsheet');
-    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+
+    return { buffer: rawBuffer, mime: 'application/pdf', ext: 'pdf' };
   }
 
   /** PPTX / PPT → PDF — extracts text from slide XML using JSZip. */
-  private async pptToPdf(buffer: Buffer): Promise<PdfResult> {
-    const zip        = await JSZip.loadAsync(buffer);
-    const slideFiles = Object.keys(zip.files)
-      .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
-      .sort((a, b) => {
-        const na = parseInt(a.match(/\d+/)?.[0] ?? '0', 10);
-        const nb = parseInt(b.match(/\d+/)?.[0] ?? '0', 10);
-        return na - nb;
-      });
+  /** PPTX / PPT → PDF via iLovePDF officepdf task (preserves full slide formatting). */
+  private async pptToPdf(buffer: Buffer, ext = 'pptx'): Promise<PdfResult> {
+    const publicKey = process.env.ILOVEPDF_PUBLIC_KEY;
+    if (!publicKey) throw new Error('ILOVEPDF_PUBLIC_KEY not set in environment');
 
-    let text = '';
-    for (let i = 0; i < slideFiles.length; i++) {
-      const xml     = await zip.files[slideFiles[i]].async('text');
-      const matches = xml.match(/<a:t[^>]*>([^<]*)<\/a:t>/g) ?? [];
-      const slide   = matches.map(m => m.replace(/<[^>]+>/g, '').trim()).filter(Boolean).join(' ');
-      if (slide) text += `Slide ${i + 1}\n${'─'.repeat(30)}\n${slide}\n\n`;
+    const filename = `presentation.${ext}`;
+    const mime =
+      ext === 'pptx'
+        ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        : 'application/vnd.ms-powerpoint';
+
+    // 1. Authenticate → get JWT token
+    const authRes = await fetch('https://api.ilovepdf.com/v1/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: publicKey }),
+    });
+    if (!authRes.ok) throw new Error(`iLovePDF auth failed: ${await authRes.text()}`);
+    const { token } = (await authRes.json()) as { token: string };
+
+    // 2. Start officepdf task → get server + task id
+    const startRes = await fetch('https://api.ilovepdf.com/v1/start/officepdf', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!startRes.ok) throw new Error(`iLovePDF start failed: ${await startRes.text()}`);
+    const { server, task } = (await startRes.json()) as { server: string; task: string };
+
+    // 3. Upload file
+    const ab = new ArrayBuffer(buffer.byteLength);
+    new Uint8Array(ab).set(buffer);
+    const uploadForm = new FormData();
+    uploadForm.append('task', task);
+    uploadForm.append('file', new Blob([ab], { type: mime }), filename);
+    const uploadRes = await fetch(`https://${server}/v1/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: uploadForm,
+    });
+    if (!uploadRes.ok) throw new Error(`iLovePDF upload failed: ${await uploadRes.text()}`);
+    const { server_filename } = (await uploadRes.json()) as { server_filename: string };
+
+    // 4. Process (convert)
+    const processRes = await fetch(`https://${server}/v1/process`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task,
+        tool: 'officepdf',
+        files: [{ server_filename, filename }],
+      }),
+    });
+    if (!processRes.ok) throw new Error(`iLovePDF process failed: ${await processRes.text()}`);
+
+    // 5. Download result
+    const dlRes = await fetch(`https://${server}/v1/download/${task}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!dlRes.ok) throw new Error(`iLovePDF download failed: ${await dlRes.text()}`);
+
+    const contentType = dlRes.headers.get('content-type') ?? '';
+    const rawBuffer = Buffer.from(await dlRes.arrayBuffer());
+
+    // iLovePDF returns a ZIP for batch jobs, direct PDF for single-file jobs
+    if (contentType.includes('zip') || contentType.includes('octet-stream')) {
+      try {
+        const zip = await JSZip.loadAsync(rawBuffer);
+        const pdfEntry = Object.values(zip.files).find((f) => f.name.endsWith('.pdf'));
+        if (pdfEntry) {
+          return { buffer: Buffer.from(await pdfEntry.async('arraybuffer')), mime: 'application/pdf', ext: 'pdf' };
+        }
+      } catch {
+        // not a zip — fall through and return as-is
+      }
     }
-    const doc = await this.renderTextAsPdf(text || '(No text content found in presentation)', 'Presentation');
-    return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
+
+    return { buffer: rawBuffer, mime: 'application/pdf', ext: 'pdf' };
   }
 
   /** RTF → PDF — strips RTF control codes to extract plain text. */
@@ -2248,18 +2659,25 @@ export class PdfService {
 
   /** DXF → PDF — parses DXF entities and renders them with pdf-lib. DWG returns a clear error. */
   async cadToPdf(buffer: Buffer, ext: string): Promise<PdfResult> {
-    if (ext === 'dwg') {
+    if (ext !== 'dxf') {
       throw new BadRequestException(
-        'DWG is a proprietary binary format with no open-source npm parser. ' +
-        'Convert to DXF first (AutoCAD: "Save As DXF", FreeCAD / LibreCAD: "Export as DXF") and re-upload the .dxf file.',
+        ext === 'dwg'
+          ? 'DWG format is not supported. Please convert your file to DXF first using AutoCAD ("Save As DXF"), FreeCAD, or LibreCAD ("Export as DXF"), then re-upload the .dxf file.'
+          : `Unsupported CAD format ".${ext}". Only DXF (.dxf) is supported.`,
       );
     }
-    if (ext !== 'dxf') {
-      throw new BadRequestException(`Unsupported CAD format ".${ext}". Supported: dxf`);
+
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const DxfParser = require('dxf-parser');
+    const parser = new DxfParser();
+    let dxf: any;
+    try {
+      dxf = parser.parseSync(buffer.toString('utf-8'));
+    } catch (e) {
+      throw new Error(`Failed to parse DXF file: ${(e as Error).message}`);
     }
 
-    const content  = buffer.toString('utf-8');
-    const entities = this.parseDxfEntities(content);
+    const entities: any[] = dxf?.entities ?? [];
 
     // ── Bounding box ─────────────────────────────────────────────────────────
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -2269,14 +2687,35 @@ export class PdfService {
       if (x > maxX) maxX = x; if (y > maxY) maxY = y;
     };
 
+    // ── Bounding box (using dxf-parser entity shapes) ─────────────────────────
     for (const e of entities) {
       switch (e.type) {
-        case 'LINE':       upd(e.x0, e.y0); upd(e.x1, e.y1); break;
+        case 'LINE':
+          upd(e.vertices?.[0]?.x ?? 0, e.vertices?.[0]?.y ?? 0);
+          upd(e.vertices?.[1]?.x ?? 0, e.vertices?.[1]?.y ?? 0);
+          break;
         case 'CIRCLE':
-        case 'ARC':        upd(e.x0 - e.r, e.y0 - e.r); upd(e.x0 + e.r, e.y0 + e.r); break;
-        case 'LWPOLYLINE': for (const v of e.vertices ?? []) upd(v.x, v.y); break;
+        case 'ARC':
+          upd((e.center?.x ?? 0) - (e.radius ?? 0), (e.center?.y ?? 0) - (e.radius ?? 0));
+          upd((e.center?.x ?? 0) + (e.radius ?? 0), (e.center?.y ?? 0) + (e.radius ?? 0));
+          break;
+        case 'LWPOLYLINE':
+        case 'POLYLINE':
+          for (const v of (e.vertices ?? [])) upd(v.x ?? 0, v.y ?? 0);
+          break;
+        case 'SPLINE':
+          for (const v of (e.controlPoints ?? e.fitPoints ?? [])) upd(v.x ?? 0, v.y ?? 0);
+          break;
+        case 'ELLIPSE':
+          upd((e.center?.x ?? 0) - Math.abs(e.majorAxisEndPoint?.x ?? 0),
+              (e.center?.y ?? 0) - Math.abs(e.majorAxisEndPoint?.y ?? 0));
+          upd((e.center?.x ?? 0) + Math.abs(e.majorAxisEndPoint?.x ?? 0),
+              (e.center?.y ?? 0) + Math.abs(e.majorAxisEndPoint?.y ?? 0));
+          break;
         case 'TEXT':
-        case 'MTEXT':      upd(e.x0 ?? 0, e.y0 ?? 0); break;
+        case 'MTEXT':
+          upd(e.startPoint?.x ?? e.position?.x ?? 0, e.startPoint?.y ?? e.position?.y ?? 0);
+          break;
       }
     }
 
@@ -2288,15 +2727,26 @@ export class PdfService {
     // A4 landscape for technical drawings
     const pageW  = 841.89;
     const pageH  = 595.28;
-    const margin = 30;
+    const margin = 40;
     const scale  = Math.min((pageW - margin * 2) / dxfW, (pageH - margin * 2) / dxfH);
 
     const tx = (x: number) => margin + (x - minX) * scale;
-    const ty = (y: number) => margin + (y - minY) * scale; // DXF Y↑ matches PDF Y↑
+    const ty = (y: number) => margin + (y - minY) * scale;
+
+    // Inline arc sampler (degrees)
+    const sampleArcPts = (cx: number, cy: number, r: number, s: number, e: number, n = 48): [number,number][] => {
+      const pts: [number,number][] = [];
+      let end = e; if (end <= s) end += 360;
+      const step = (end - s) / n;
+      for (let d = s; d <= end + step * 0.5; d += step) {
+        const rad = Math.min(d, end) * (Math.PI / 180);
+        pts.push([cx + r * Math.cos(rad), cy + r * Math.sin(rad)]);
+      }
+      return pts;
+    };
 
     const doc  = await PDFDocument.create();
     doc.setTitle('CAD Drawing');
-    doc.setProducer('ImageDigitalHub');
     const page = doc.addPage([pageW, pageH]);
     const font = await doc.embedFont(StandardFonts.Helvetica);
     const ink  = rgb(0.1, 0.1, 0.1);
@@ -2305,47 +2755,82 @@ export class PdfService {
     for (const e of entities) {
       try {
         switch (e.type) {
-          case 'LINE':
-            page.drawLine({
-              start: { x: tx(e.x0 ?? 0), y: ty(e.y0 ?? 0) },
-              end:   { x: tx(e.x1 ?? 0), y: ty(e.y1 ?? 0) },
-              color: ink, thickness: sw,
-            });
-            break;
-
-          case 'CIRCLE':
-            page.drawCircle({
-              x: tx(e.x0), y: ty(e.y0),
-              size: (e.r ?? 0) * scale,
-              borderColor: ink, borderWidth: sw,
-            });
-            break;
-
-          case 'ARC': {
-            const pts = this.sampleArc(e.x0, e.y0, e.r ?? 0, e.startAngle ?? 0, e.endAngle ?? 360, 48);
-            for (let j = 0; j < pts.length - 1; j++) {
+          case 'LINE': {
+            const v = e.vertices ?? [];
+            if (v.length >= 2) {
               page.drawLine({
-                start: { x: tx(pts[j][0]),     y: ty(pts[j][1])     },
-                end:   { x: tx(pts[j + 1][0]), y: ty(pts[j + 1][1]) },
+                start: { x: tx(v[0].x), y: ty(v[0].y) },
+                end:   { x: tx(v[1].x), y: ty(v[1].y) },
                 color: ink, thickness: sw,
               });
             }
             break;
           }
 
-          case 'LWPOLYLINE': {
-            const verts = e.vertices ?? [];
-            for (let j = 0; j < verts.length - 1; j++) {
+          case 'CIRCLE':
+            page.drawCircle({
+              x: tx(e.center.x), y: ty(e.center.y),
+              size: (e.radius ?? 0) * scale,
+              borderColor: ink, borderWidth: sw,
+            });
+            break;
+
+          case 'ARC': {
+            const pts = sampleArcPts(e.center.x, e.center.y, e.radius ?? 0, e.startAngle ?? 0, e.endAngle ?? 360);
+            for (let j = 0; j < pts.length - 1; j++) {
               page.drawLine({
-                start: { x: tx(verts[j].x),     y: ty(verts[j].y)     },
-                end:   { x: tx(verts[j + 1].x), y: ty(verts[j + 1].y) },
+                start: { x: tx(pts[j][0]),     y: ty(pts[j][1])     },
+                end:   { x: tx(pts[j+1][0]), y: ty(pts[j+1][1]) },
                 color: ink, thickness: sw,
               });
             }
-            if (e.closed && verts.length > 1) {
+            break;
+          }
+
+          case 'LWPOLYLINE':
+          case 'POLYLINE': {
+            const verts = e.vertices ?? [];
+            const closed = e.shape ?? e.closed ?? false;
+            const count  = closed ? verts.length : verts.length - 1;
+            for (let j = 0; j < count; j++) {
+              const a = verts[j], b = verts[(j + 1) % verts.length];
               page.drawLine({
-                start: { x: tx(verts[verts.length - 1].x), y: ty(verts[verts.length - 1].y) },
-                end:   { x: tx(verts[0].x),                y: ty(verts[0].y)                },
+                start: { x: tx(a.x), y: ty(a.y) },
+                end:   { x: tx(b.x), y: ty(b.y) },
+                color: ink, thickness: sw,
+              });
+            }
+            break;
+          }
+
+          case 'SPLINE': {
+            const pts = e.controlPoints ?? e.fitPoints ?? [];
+            for (let j = 0; j < pts.length - 1; j++) {
+              page.drawLine({
+                start: { x: tx(pts[j].x),   y: ty(pts[j].y)   },
+                end:   { x: tx(pts[j+1].x), y: ty(pts[j+1].y) },
+                color: ink, thickness: sw,
+              });
+            }
+            break;
+          }
+
+          case 'ELLIPSE': {
+            const cx = e.center?.x ?? 0, cy = e.center?.y ?? 0;
+            const majorX = e.majorAxisEndPoint?.x ?? 0, majorY = e.majorAxisEndPoint?.y ?? 0;
+            const major  = Math.sqrt(majorX * majorX + majorY * majorY);
+            const minor  = major * (e.axisRatio ?? 1);
+            const rot    = Math.atan2(majorY, majorX);
+            const startA = ((e.startAngle ?? 0) * 180) / Math.PI;
+            const endA   = ((e.endAngle   ?? Math.PI * 2) * 180) / Math.PI;
+            const pts    = sampleArcPts(0, 0, 1, startA, endA);
+            for (let j = 0; j < pts.length - 1; j++) {
+              const ax = pts[j][0]*major,   ay = pts[j][1]*minor;
+              const bx = pts[j+1][0]*major, by = pts[j+1][1]*minor;
+              const cosR = Math.cos(rot), sinR = Math.sin(rot);
+              page.drawLine({
+                start: { x: tx(cx + ax*cosR - ay*sinR), y: ty(cy + ax*sinR + ay*cosR) },
+                end:   { x: tx(cx + bx*cosR - by*sinR), y: ty(cy + bx*sinR + by*cosR) },
                 color: ink, thickness: sw,
               });
             }
@@ -2354,10 +2839,16 @@ export class PdfService {
 
           case 'TEXT':
           case 'MTEXT': {
-            const txt = this.sanitizeForPdf(e.text ?? '').trim();
-            if (txt) {
-              const fs = Math.max(6, Math.min((e.h ?? 2.5) * scale, 12));
-              page.drawText(txt, { x: tx(e.x0 ?? 0), y: ty(e.y0 ?? 0), size: fs, font, color: ink });
+            const x   = e.startPoint?.x ?? e.position?.x ?? 0;
+            const y   = e.startPoint?.y ?? e.position?.y ?? 0;
+            const raw = (e.text ?? e.string ?? '').replace(/\\[^;]+;/g, '').replace(/[{}]/g, '').trim();
+            if (raw) {
+              const h = e.textHeight ?? e.height ?? 2.5;
+              page.drawText(this.sanitizeForPdf(raw), {
+                x: tx(x), y: ty(y),
+                size: Math.max(6, Math.min(h * scale, 14)),
+                font, color: ink,
+              });
             }
             break;
           }
@@ -2366,86 +2857,6 @@ export class PdfService {
     }
 
     return { buffer: this.toBuffer(await doc.save()), mime: 'application/pdf', ext: 'pdf' };
-  }
-
-  /** Sample an ARC into N line-segment points (angles in degrees). */
-  private sampleArc(
-    cx: number, cy: number, r: number,
-    startDeg: number, endDeg: number, n: number,
-  ): [number, number][] {
-    const pts: [number, number][] = [];
-    let s = startDeg;
-    let e = endDeg;
-    if (e <= s) e += 360;
-    const step = (e - s) / n;
-    for (let d = s; d <= e + step * 0.5; d += step) {
-      const rad = Math.min(d, e) * (Math.PI / 180);
-      pts.push([cx + r * Math.cos(rad), cy + r * Math.sin(rad)]);
-    }
-    return pts;
-  }
-
-  /**
-   * Minimal DXF parser — reads the ENTITIES section and extracts:
-   * LINE, CIRCLE, ARC, LWPOLYLINE, TEXT, MTEXT.
-   * DXF format: sequential group-code / value line pairs.
-   */
-  private parseDxfEntities(content: string): any[] {
-    const lines    = content.split(/\r?\n/);
-    const entities: any[] = [];
-    let inEntities = false;
-    let cur: any   = null;
-    let i          = 0;
-
-    while (i < lines.length - 1) {
-      const codeLine = lines[i++].trim();
-      const valLine  = lines[i++]?.trim() ?? '';
-
-      const code = parseInt(codeLine, 10);
-      if (isNaN(code)) { i -= 1; continue; } // re-sync on stray blank line
-
-      const val = valLine;
-      const num = parseFloat(val);
-
-      if (code === 0) {
-        if (val === 'ENTITIES') { inEntities = true; continue; }
-        if (val === 'ENDSEC' || val === 'EOF') { inEntities = false; continue; }
-        if (inEntities) {
-          cur = { type: val };
-          if (val === 'LWPOLYLINE') cur.vertices = [];
-          entities.push(cur);
-        }
-        continue;
-      }
-
-      if (!inEntities || !cur) continue;
-
-      switch (code) {
-        case 8:  cur.layer = val; break;
-        case 1:  cur.text  = val; break;
-        case 3:  cur.text  = (cur.text ?? '') + val; break; // MTEXT overflow continuation
-        case 10:
-          if (cur.type === 'LWPOLYLINE') { cur._px = isNaN(num) ? 0 : num; }
-          else { cur.x0 = isNaN(num) ? 0 : num; }
-          break;
-        case 20:
-          if (cur.type === 'LWPOLYLINE') {
-            (cur.vertices ??= []).push({ x: cur._px ?? 0, y: isNaN(num) ? 0 : num });
-          } else { cur.y0 = isNaN(num) ? 0 : num; }
-          break;
-        case 11: cur.x1 = isNaN(num) ? 0 : num; break;
-        case 21: cur.y1 = isNaN(num) ? 0 : num; break;
-        case 40:
-          if (cur.type === 'TEXT' || cur.type === 'MTEXT') cur.h = isNaN(num) ? 2.5 : num;
-          else cur.r = isNaN(num) ? 0 : num;
-          break;
-        case 50: cur.startAngle = isNaN(num) ? 0   : num; break;
-        case 51: cur.endAngle   = isNaN(num) ? 360 : num; break;
-        case 70: cur.flags = parseInt(val) || 0; cur.closed = (cur.flags & 1) !== 0; break;
-      }
-    }
-
-    return entities;
   }
 
   /** EPUB → PDF — unzips the EPUB, extracts HTML chapter text with node-html-parser. */
@@ -2684,12 +3095,21 @@ export class PdfService {
   /* ─── Translate PDF ─────────────────────────────────────────────────────── */
   async translatePdf(buffer: Buffer, targetLang: string): Promise<PdfResult> {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ text: string }>;
+    const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js') as any;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
 
-    const lang = (targetLang || 'es').replace(/[^a-z-]/gi, '').slice(0, 10);
+    const lang   = (targetLang || 'es').replace(/[^a-z-]/gi, '').slice(0, 10);
+    const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer), verbosity: 0 }).promise;
 
-    const parsed = await pdfParse(buffer);
-    const rawText = parsed.text || '';
+    let rawText = '';
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page    = await pdfDoc.getPage(i);
+      const content = await page.getTextContent();
+      rawText += (content.items as any[]).map((item: any) => item.str).join(' ') + '\n';
+    }
+
+    // Strip invisible chars from source before translation
+    rawText = rawText.replace(/[\u200B-\u200F\u2028\u2029\u2060\uFEFF\u00AD]/g, '');
 
     if (!rawText.trim()) {
       throw new BadRequestException('No extractable text found in this PDF. Scanned/image PDFs cannot be translated.');
@@ -2711,7 +3131,7 @@ export class PdfService {
       if (!resp.ok) throw new BadRequestException(`Translation failed (HTTP ${resp.status}). Try again later.`);
       const data = await resp.json() as any[][];
       const parts: string[] = (data[0] ?? []).map((seg: any[]) => seg[0] ?? '');
-      translated.push(parts.join(''));
+      translated.push(this.sanitizeWinAnsi(parts.join('')));
     }
 
     const finalText = translated.join('\n');
@@ -2774,8 +3194,9 @@ export class PdfService {
 
     // Pixels above this value get pushed toward/to white.
     // Content text is typically < 100, watermarks typically 130-230.
-    const threshold = Math.round(210 - pct * 60); // 210 at 0%, 150 at 100%
-    const linearA   = 255 / threshold;             // multiply so threshold maps to 255
+    // Pixels with luminance above this are treated as watermark and set to white.
+    // Content text is typically < 100 luminance; watermarks typically 130–230.
+    const threshold = Math.round(210 - pct * 60); // ~210 at 0% strength, ~150 at 100%
 
     const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js') as any;
     const { createCanvas } = require('canvas') as { createCanvas: (w: number, h: number) => any };
@@ -2793,21 +3214,51 @@ export class PdfService {
 
       const canvas  = createCanvas(w, h);
       const context = canvas.getContext('2d');
+      // Fill white so transparent PDF areas don't render as dark/black
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, w, h);
 
       const canvasFactory = {
-        create:  (cw: number, ch: number) => { const c = createCanvas(cw, ch); return { canvas: c, context: c.getContext('2d') }; },
-        reset:   (pair: any, cw: number, ch: number) => { pair.canvas.width = cw; pair.canvas.height = ch; },
+        create:  (cw: number, ch: number) => {
+          const c = createCanvas(cw, ch);
+          const ctx = c.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, cw, ch);
+          return { canvas: c, context: ctx };
+        },
+        reset:   (pair: any, cw: number, ch: number) => {
+          pair.canvas.width = cw;
+          pair.canvas.height = ch;
+          pair.context.fillStyle = '#ffffff';
+          pair.context.fillRect(0, 0, cw, ch);
+        },
         destroy: (pair: any) => { pair.canvas.width = 0; pair.canvas.height = 0; },
       };
 
       await page.render({ canvasContext: context, viewport, canvasFactory }).promise;
       const pageImgBuf = canvas.toBuffer('image/png');
 
-      // Linear stretch: output = linearA * input (clamped 0-255)
-      // Pixels above threshold → white; dark text (< ~100) → stays dark
-      const cleaned = await (sharp as any)(pageImgBuf)
-        .linear(linearA, 0)
-        .sharpen({ sigma: 0.5 })
+      // Selective whitening: only push light/gray pixels (watermarks) to white.
+      // Dark pixels (text, graphics) are left exactly unchanged.
+      const { data, info } = await (sharp as any)(pageImgBuf)
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const channels: number = info.channels;
+      for (let p = 0; p < data.length; p += channels) {
+        const lum = data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114;
+        if (lum > threshold) {
+          data[p] = 255;
+          data[p + 1] = 255;
+          data[p + 2] = 255;
+          if (channels === 4) data[p + 3] = 255;
+        }
+        // else: pixel stays exactly as rendered — text/graphics untouched
+      }
+
+      const cleaned = await (sharp as any)(data, {
+        raw: { width: info.width, height: info.height, channels },
+      })
         .png()
         .toBuffer();
 
