@@ -256,7 +256,7 @@ export class PdfService {
           return {
             type:              'text',
             text:               el.text || '',
-            pages:             { ranges: [{ start: el.page ?? 1, end: el.page ?? 1 }], rangeType: 'fixed' },
+            pages:              String(el.page ?? 1),
             position:          { x: el.x, y: pageH - el.y },
             font_family:       'Arial',
             font_style:        'Regular',
